@@ -46,6 +46,7 @@ import {
   subscribeToDataUpdates,
 } from '@/lib/db.client';
 import {
+  buildEpisodeProgressContentKey,
   loadLocalEpisodeProgress,
   pruneLocalEpisodeProgressStorage,
   saveLocalEpisodeProgress,
@@ -632,6 +633,13 @@ function PlayPageClient() {
   // 搜索所需信息
   const [searchTitle] = useState(searchParams.get('stitle') || '');
   const [searchType] = useState(searchParams.get('stype') || '');
+  const [episodeProgressContentKey] = useState(() =>
+    buildEpisodeProgressContentKey({
+      title: searchTitle || searchParams.get('title') || '',
+      year: searchParams.get('year') || '',
+      searchType,
+    })
+  );
 
   // 是否需要优选
   const [needPrefer, setNeedPrefer] = useState(
@@ -3915,8 +3923,7 @@ function PlayPageClient() {
               // 否则使用点击的文件集数，从头开始播放
               initialIndex = detailData.initialEpisodeIndex;
               const localEpisodeTime = loadLocalEpisodeProgress(
-                detailData.source,
-                detailData.id,
+                episodeProgressContentKey,
                 initialIndex
               );
               resumeTimeRef.current = localEpisodeTime;
@@ -3935,8 +3942,7 @@ function PlayPageClient() {
             // 使用点击的文件集数
             initialIndex = detailData.initialEpisodeIndex;
             resumeTimeRef.current = loadLocalEpisodeProgress(
-              detailData.source,
-              detailData.id,
+              episodeProgressContentKey,
               initialIndex
             );
             console.log('[Play] 没有播放记录，使用点击的文件集数:', initialIndex);
@@ -3944,8 +3950,7 @@ function PlayPageClient() {
             // 默认从第0集开始
             initialIndex = 0;
             resumeTimeRef.current = loadLocalEpisodeProgress(
-              detailData.source,
-              detailData.id,
+              episodeProgressContentKey,
               initialIndex
             );
             console.log('[Play] 没有播放记录，从第0集开始');
@@ -4141,8 +4146,7 @@ function PlayPageClient() {
     }
 
     return loadLocalEpisodeProgress(
-      currentSourceRef.current,
-      currentIdRef.current,
+      episodeProgressContentKey,
       episodeIndex
     );
   };
@@ -4231,8 +4235,7 @@ function PlayPageClient() {
       const resumeTime = isSameEpisodeSwitch
         ? await getSourceSwitchResumeTime(previousEpisodeIndex, currentPlayTime)
         : loadLocalEpisodeProgress(
-            newSource,
-            newId,
+            episodeProgressContentKey,
             targetIndex
           );
       resumeTimeRef.current = resumeTime;
@@ -4277,8 +4280,7 @@ function PlayPageClient() {
       if (isSameEpisodeSwitch && resumeTime && resumeTime > 1) {
         const currentDuration = artPlayerRef.current?.duration || 0;
         saveLocalEpisodeProgress(
-          newSource,
-          newId,
+          episodeProgressContentKey,
           targetIndex,
           resumeTime,
           currentDuration
@@ -4352,8 +4354,7 @@ function PlayPageClient() {
         resumeTimeRef.current = record.play_time;
       } else {
         resumeTimeRef.current = loadLocalEpisodeProgress(
-          currentSourceRef.current,
-          currentIdRef.current,
+          episodeProgressContentKey,
           targetEpisodeIndex
         );
       }
@@ -4361,8 +4362,7 @@ function PlayPageClient() {
       console.warn('[Play] Failed to prime episode resume state:', error);
       if (currentSourceRef.current && currentIdRef.current) {
         resumeTimeRef.current = loadLocalEpisodeProgress(
-          currentSourceRef.current,
-          currentIdRef.current,
+          episodeProgressContentKey,
           targetEpisodeIndex
         );
       } else {
@@ -5415,8 +5415,7 @@ function PlayPageClient() {
 
     try {
       saveLocalEpisodeProgress(
-        currentSourceRef.current,
-        currentIdRef.current,
+        episodeProgressContentKey,
         currentEpisodeIndexRef.current,
         currentTime,
         duration
@@ -9190,6 +9189,7 @@ function PlayPageClient() {
                 isRoomMember={playSync.shouldDisableControls}
                 currentSource={currentSource}
                 currentId={currentId}
+                episodeProgressContentKey={episodeProgressContentKey || undefined}
                 videoTitle={searchTitle || videoTitle}
                 availableSources={availableSources}
                 sourceSearchLoading={sourceSearchLoading}

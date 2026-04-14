@@ -1,11 +1,22 @@
 const EPISODE_PROGRESS_PREFIX = 'moontv_episode_progress:';
-const EPISODE_PROGRESS_MAX_ENTRIES = 200;
+const EPISODE_PROGRESS_MAX_SHOWS = 200;
 const EPISODE_PROGRESS_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 120;
 
-interface LocalEpisodeProgressRecord {
+export interface LocalEpisodeProgressRecord {
   playTime: number;
   totalTime: number;
   updatedAt: number;
+}
+
+interface EpisodeProgressContentIdentity {
+  title?: string;
+  year?: string;
+  searchType?: string;
+}
+
+interface LocalEpisodeProgressStore {
+  updatedAt: number;
+  episodes: Record<string, LocalEpisodeProgressRecord>;
 }
 
 function isBrowser() {
@@ -19,27 +30,116 @@ function isQuotaExceededError(error: unknown) {
   );
 }
 
-function parseEpisodeProgressRecord(raw: string | null): LocalEpisodeProgressRecord | null {
+function parseEpisodeProgressRecord(
+  value: unknown
+): LocalEpisodeProgressRecord | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const parsed = value as Partial<LocalEpisodeProgressRecord>;
+  const playTime = Number(parsed.playTime);
+  const totalTime = Number(parsed.totalTime);
+  const updatedAt = Number(parsed.updatedAt);
+
+  if (!Number.isFinite(playTime) || playTime <= 0) {
+    return null;
+  }
+
+  return {
+    playTime: Math.floor(playTime),
+    totalTime: Number.isFinite(totalTime) && totalTime >= 0 ? Math.floor(totalTime) : 0,
+    updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0,
+  };
+}
+
+function normalizeEpisodeProgressStore(
+  value: unknown
+): { store: LocalEpisodeProgressStore | null; changed: boolean } {
+  if (!value || typeof value !== 'object') {
+    return { store: null, changed: false };
+  }
+
+  const parsed = value as Partial<LocalEpisodeProgressStore>;
+  const rawEpisodes = parsed.episodes;
+  if (!rawEpisodes || typeof rawEpisodes !== 'object') {
+    return { store: null, changed: false };
+  }
+
+  const now = Date.now();
+  const episodes: Record<string, LocalEpisodeProgressRecord> = {};
+  let latestUpdatedAt = 0;
+  let changed = false;
+
+  for (const [episodeIndex, entry] of Object.entries(rawEpisodes)) {
+    const normalized = parseEpisodeProgressRecord(entry);
+    if (!normalized) {
+      changed = true;
+      continue;
+    }
+
+    if (
+      normalized.updatedAt > 0 &&
+      now - normalized.updatedAt > EPISODE_PROGRESS_MAX_AGE_MS
+    ) {
+      changed = true;
+      continue;
+    }
+
+    episodes[episodeIndex] = normalized;
+    latestUpdatedAt = Math.max(latestUpdatedAt, normalized.updatedAt);
+  }
+
+  if (Object.keys(episodes).length === 0) {
+    return { store: null, changed: true };
+  }
+
+  const rootUpdatedAt = Number(parsed.updatedAt);
+  const normalizedUpdatedAt =
+    Number.isFinite(rootUpdatedAt) && rootUpdatedAt > 0
+      ? Math.max(rootUpdatedAt, latestUpdatedAt)
+      : latestUpdatedAt;
+
+  if (normalizedUpdatedAt !== rootUpdatedAt) {
+    changed = true;
+  }
+
+  return {
+    store: {
+      updatedAt: normalizedUpdatedAt,
+      episodes,
+    },
+    changed,
+  };
+}
+
+function readEpisodeProgressStore(contentKey: string): LocalEpisodeProgressStore | null {
+  if (!isBrowser()) {
+    return null;
+  }
+
+  const key = getEpisodeProgressStorageKey(contentKey);
+  const raw = localStorage.getItem(key);
   if (!raw) {
     return null;
   }
 
   try {
-    const parsed = JSON.parse(raw) as Partial<LocalEpisodeProgressRecord>;
-    const playTime = Number(parsed.playTime);
-    const totalTime = Number(parsed.totalTime);
-    const updatedAt = Number(parsed.updatedAt);
+    const parsed = JSON.parse(raw);
+    const { store, changed } = normalizeEpisodeProgressStore(parsed);
 
-    if (!Number.isFinite(playTime) || playTime <= 0) {
+    if (!store) {
+      localStorage.removeItem(key);
       return null;
     }
 
-    return {
-      playTime,
-      totalTime: Number.isFinite(totalTime) && totalTime >= 0 ? totalTime : 0,
-      updatedAt: Number.isFinite(updatedAt) && updatedAt > 0 ? updatedAt : 0,
-    };
+    if (changed) {
+      localStorage.setItem(key, JSON.stringify(store));
+    }
+
+    return store;
   } catch {
+    localStorage.removeItem(key);
     return null;
   }
 }
@@ -49,70 +149,97 @@ function collectEpisodeProgressEntries() {
     return [];
   }
 
-  const entries: Array<{ key: string; record: LocalEpisodeProgressRecord }> = [];
   const keys = Array.from({ length: localStorage.length }, (_, index) =>
     localStorage.key(index)
   ).filter((key): key is string => Boolean(key));
+
+  const entries: Array<{ key: string; updatedAt: number }> = [];
 
   for (const key of keys) {
     if (!key.startsWith(EPISODE_PROGRESS_PREFIX)) {
       continue;
     }
 
-    const record = parseEpisodeProgressRecord(localStorage.getItem(key));
-    if (!record) {
+    const raw = localStorage.getItem(key);
+    if (!raw) {
       localStorage.removeItem(key);
       continue;
     }
 
-    entries.push({ key, record });
+    try {
+      const parsed = JSON.parse(raw);
+      const { store, changed } = normalizeEpisodeProgressStore(parsed);
+      if (!store) {
+        localStorage.removeItem(key);
+        continue;
+      }
+
+      if (changed) {
+        localStorage.setItem(key, JSON.stringify(store));
+      }
+
+      entries.push({
+        key,
+        updatedAt: store.updatedAt,
+      });
+    } catch {
+      localStorage.removeItem(key);
+    }
   }
 
   return entries;
 }
 
-export function getEpisodeProgressStorageKey(
-  source: string,
-  id: string,
-  episodeIndex: number
+function normalizeContentTitle(title: string) {
+  return title
+    .replace(/\s+/g, '')
+    .replace(/[\uff01-\uff5e]/g, (char) =>
+      String.fromCharCode(char.charCodeAt(0) - 0xfee0)
+    )
+    .replace(/[()（）[\]【】{}「」『』<>《》]/g, '')
+    .replace(/[^\w\u4e00-\u9fa5]/g, '')
+    .toLowerCase();
+}
+
+export function buildEpisodeProgressContentKey(
+  identity: EpisodeProgressContentIdentity
 ) {
-  return `${EPISODE_PROGRESS_PREFIX}${source}+${id}:${episodeIndex}`;
+  const title = normalizeContentTitle(identity.title || '');
+  const year = String(identity.year || '').trim();
+  const searchType = String(identity.searchType || '').trim().toLowerCase();
+
+  if (!title) {
+    return null;
+  }
+
+  return `${title}|${year}|${searchType}`;
+}
+
+export function getEpisodeProgressStorageKey(contentKey: string) {
+  return `${EPISODE_PROGRESS_PREFIX}${contentKey}`;
+}
+
+export function loadAllLocalEpisodeProgressRecords(contentKey: string | null) {
+  if (!contentKey) {
+    return {};
+  }
+
+  return readEpisodeProgressStore(contentKey)?.episodes || {};
 }
 
 export function loadLocalEpisodeProgressRecord(
-  source: string,
-  id: string,
+  contentKey: string | null,
   episodeIndex: number
 ) {
-  if (!isBrowser()) {
-    return null;
-  }
-
-  const key = getEpisodeProgressStorageKey(source, id, episodeIndex);
-  const record = parseEpisodeProgressRecord(localStorage.getItem(key));
-
-  if (!record) {
-    localStorage.removeItem(key);
-    return null;
-  }
-
-  if (
-    record.updatedAt > 0 &&
-    Date.now() - record.updatedAt > EPISODE_PROGRESS_MAX_AGE_MS
-  ) {
-    localStorage.removeItem(key);
-    return null;
-  }
-
-  return record;
+  const episodes = loadAllLocalEpisodeProgressRecords(contentKey);
+  return episodes[String(episodeIndex)] || null;
 }
 
 export function loadLocalEpisodeProgress(
-  source: string,
-  id: string,
+  contentKey: string | null,
   episodeIndex: number
 ) {
-  const record = loadLocalEpisodeProgressRecord(source, id, episodeIndex);
+  const record = loadLocalEpisodeProgressRecord(contentKey, episodeIndex);
   if (!record) {
     return null;
   }
@@ -122,50 +249,57 @@ export function loadLocalEpisodeProgress(
     : null;
 }
 
-export function pruneLocalEpisodeProgressStorage(maxEntries = EPISODE_PROGRESS_MAX_ENTRIES) {
+export function pruneLocalEpisodeProgressStorage(
+  maxShows = EPISODE_PROGRESS_MAX_SHOWS
+) {
   if (!isBrowser()) {
     return;
   }
 
-  const now = Date.now();
-  const entries = collectEpisodeProgressEntries();
+  const entries = collectEpisodeProgressEntries().sort(
+    (a, b) => b.updatedAt - a.updatedAt
+  );
 
-  entries.forEach(({ key, record }) => {
-    if (record.updatedAt > 0 && now - record.updatedAt > EPISODE_PROGRESS_MAX_AGE_MS) {
-      localStorage.removeItem(key);
-    }
-  });
-
-  const validEntries = entries
-    .filter(({ record }) => record.updatedAt <= 0 || now - record.updatedAt <= EPISODE_PROGRESS_MAX_AGE_MS)
-    .sort((a, b) => b.record.updatedAt - a.record.updatedAt);
-
-  if (validEntries.length <= maxEntries) {
+  if (entries.length <= maxShows) {
     return;
   }
 
-  validEntries.slice(maxEntries).forEach(({ key }) => {
+  entries.slice(maxShows).forEach(({ key }) => {
     localStorage.removeItem(key);
   });
 }
 
 export function saveLocalEpisodeProgress(
-  source: string,
-  id: string,
+  contentKey: string | null,
   episodeIndex: number,
   playTime: number,
   totalTime: number
 ) {
-  if (!isBrowser() || !Number.isFinite(playTime) || playTime <= 0) {
+  if (
+    !isBrowser() ||
+    !contentKey ||
+    !Number.isFinite(playTime) ||
+    playTime <= 0
+  ) {
     return;
   }
 
-  const key = getEpisodeProgressStorageKey(source, id, episodeIndex);
-  const payload = JSON.stringify({
-    playTime: Math.floor(playTime),
-    totalTime: Number.isFinite(totalTime) && totalTime >= 0 ? Math.floor(totalTime) : 0,
-    updatedAt: Date.now(),
-  });
+  const key = getEpisodeProgressStorageKey(contentKey);
+  const now = Date.now();
+  const currentStore = readEpisodeProgressStore(contentKey);
+  const nextStore: LocalEpisodeProgressStore = {
+    updatedAt: now,
+    episodes: {
+      ...(currentStore?.episodes || {}),
+      [String(episodeIndex)]: {
+        playTime: Math.floor(playTime),
+        totalTime: Number.isFinite(totalTime) && totalTime >= 0 ? Math.floor(totalTime) : 0,
+        updatedAt: now,
+      },
+    },
+  };
+
+  const payload = JSON.stringify(nextStore);
 
   try {
     localStorage.setItem(key, payload);
@@ -175,7 +309,7 @@ export function saveLocalEpisodeProgress(
       throw error;
     }
 
-    pruneLocalEpisodeProgressStorage(Math.max(50, Math.floor(EPISODE_PROGRESS_MAX_ENTRIES / 2)));
+    pruneLocalEpisodeProgressStorage(Math.max(50, Math.floor(EPISODE_PROGRESS_MAX_SHOWS / 2)));
     localStorage.setItem(key, payload);
     pruneLocalEpisodeProgressStorage();
   }

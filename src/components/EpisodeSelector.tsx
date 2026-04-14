@@ -12,7 +12,7 @@ import React, {
 
 import type { DanmakuComment,DanmakuSelection } from '@/lib/danmaku/types';
 import { generateStorageKey, getCachedPlayRecordsSnapshot } from '@/lib/db.client';
-import { loadLocalEpisodeProgressRecord } from '@/lib/episode-progress';
+import { loadAllLocalEpisodeProgressRecords } from '@/lib/episode-progress';
 import { EpisodeFilterConfig,SearchResult } from '@/lib/types';
 import { getVideoResolutionFromM3u8 } from '@/lib/utils';
 
@@ -44,6 +44,7 @@ interface EpisodeSelectorProps {
   onSourceChange?: (source: string, id: string, title: string) => void;
   currentSource?: string;
   currentId?: string;
+  episodeProgressContentKey?: string;
   videoTitle?: string;
   videoYear?: string;
   availableSources?: SearchResult[];
@@ -77,6 +78,7 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   onSourceChange,
   currentSource,
   currentId,
+  episodeProgressContentKey,
   videoTitle,
   availableSources = [],
   sourceSearchLoading = false,
@@ -127,7 +129,12 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
   }, [videoInfoMap]);
 
   useEffect(() => {
-    if (typeof window === 'undefined' || !currentSource || !currentId) {
+    if (
+      typeof window === 'undefined' ||
+      !currentSource ||
+      !currentId ||
+      !episodeProgressContentKey
+    ) {
       setWatchedEpisodes(new Set());
       return;
     }
@@ -145,19 +152,21 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
         console.warn('[EpisodeSelector] Failed to read cached play records:', error);
       }
 
-      for (let episodeNumber = 1; episodeNumber <= totalEpisodes; episodeNumber++) {
-        try {
-          const record = loadLocalEpisodeProgressRecord(
-            currentSource,
-            currentId,
-            episodeNumber - 1
-          );
+      try {
+        const episodeRecords = loadAllLocalEpisodeProgressRecords(
+          episodeProgressContentKey
+        );
+
+        for (const [episodeIndex, record] of Object.entries(episodeRecords)) {
           if (Number(record?.playTime) > 1) {
-            watched.add(episodeNumber);
+            const episodeNumber = Number(episodeIndex) + 1;
+            if (episodeNumber >= 1 && episodeNumber <= totalEpisodes) {
+              watched.add(episodeNumber);
+            }
           }
-        } catch (error) {
-          console.warn('[EpisodeSelector] Failed to read local episode progress:', error);
         }
+      } catch (error) {
+        console.warn('[EpisodeSelector] Failed to read local episode progress:', error);
       }
 
       setWatchedEpisodes(watched);
@@ -179,7 +188,7 @@ const EpisodeSelector: React.FC<EpisodeSelectorProps> = ({
       );
       window.removeEventListener('storage', handlePlayRecordsUpdated);
     };
-  }, [currentSource, currentId, totalEpisodes, value]);
+  }, [currentSource, currentId, episodeProgressContentKey, totalEpisodes, value]);
 
   // 主要的 tab 状态：'danmaku' | 'episodes' | 'sources'
   // 默认显示选集选项卡，但如果是房员则显示弹幕
